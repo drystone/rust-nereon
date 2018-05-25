@@ -1,10 +1,31 @@
+// Copyright (c) 2018, [Ribose Inc](https://www.ribose.com).
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NO/T
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+// A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
+// OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+// SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+// LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+// DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
+// THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+// (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
 extern crate libc;
 
 use std::ffi::{CStr, CString};
-use std::io;
-use std::mem;
 use std::path::Path;
-use std::ptr;
+use std::{io, mem, ptr, slice};
 
 #[link(name = "nereon")]
 extern "C" {
@@ -22,23 +43,28 @@ const CFG_MAX_SHORT_DESC: usize = 32;
 const CFG_MAX_LONG_DESC: usize = 128;
 const CFG_MAX_ENV_NAME: usize = 64;
 const CFG_MAX_KEY_NAME: usize = 128;
-const CFG_MAX_ERR_MSG: usize = 1024;
+
+const NEREON_TYPE_INT: libc::c_int = 0;
+const NEREON_TYPE_BOOL: libc::c_int = 1;
+const NEREON_TYPE_STRING: libc::c_int = 2;
+const NEREON_TYPE_ARRAY: libc::c_int = 3;
+const NEREON_TYPE_IPPORT: libc::c_int = 4;
+const NEREON_TYPE_FLOAT: libc::c_int = 5;
+const NEREON_TYPE_OBJECT: libc::c_int = 6;
 
 #[repr(C)]
 struct Ctx {
-    meta: *mut libc::c_void,
+    meta: *const Meta,
     meta_count: libc::c_int,
-    cfg: *const libc::c_void,
+    cfg: *const Cfg,
 }
 
 #[repr(C)]
 struct Cfg {
     cfg_key: [libc::c_char; CFG_MAX_KEY_NAME],
     cfg_type: libc::c_int,
-
-    childs: *const libc::c_void,
-    next: *const libc::c_void,
-
+    childs: *const Cfg,
+    next: *const Cfg,
     cfg_data: f64,
 }
 
@@ -46,47 +72,14 @@ struct Cfg {
 struct Meta {
     cfg_name: [libc::c_char; CFG_MAX_NAME],
     cfg_type: libc::c_int,
-
     helper: bool,
-
     sw_short: [libc::c_char; 2],
     sw_long: [libc::c_char; CFG_MAX_LONG_SWITCH],
-
     desc_short: [libc::c_char; CFG_MAX_SHORT_DESC],
     desc_long: [libc::c_char; CFG_MAX_LONG_DESC],
-
     cfg_env: [libc::c_char; CFG_MAX_ENV_NAME],
     cfg_key: [libc::c_char; CFG_MAX_KEY_NAME],
-
     cfg_data: f64,
-}
-
-#[repr(C)]
-struct Data {
-    d: [libc::c_char; 8],
-}
-
-struct PathOrNull {
-    cstr: CString,
-    ptr: *const libc::c_char,
-}
-
-impl PathOrNull {
-    fn new(path: Option<&Path>) -> PathOrNull {
-        match path {
-            Some(p) => {
-                let cstr = CString::new(p.to_str().unwrap()).unwrap();
-                PathOrNull {
-                    ptr: cstr.as_ptr(),
-                    cstr: cstr,
-                }
-            }
-            None => PathOrNull {
-                cstr: CString::new("").unwrap(),
-                ptr: ptr::null(),
-            },
-        }
-    }
 }
 
 pub fn nereon(
@@ -99,83 +92,112 @@ pub fn nereon(
         cfg: ptr::null(),
     };
 
-    let cfg = PathOrNull::new(cfg);
+    let c_cfg;
+    let mut c_cfg_ptr = ptr::null();
+    if let Some(path) = cfg {
+        c_cfg = CString::new(path.to_str().unwrap()).unwrap();
+        c_cfg_ptr = c_cfg.as_ptr();
+    }
 
-    unsafe { libc::puts(cfg.ptr) };
+    let c_meta;
+    let mut c_meta_ptr = ptr::null();
+    if let Some(path) = meta {
+        c_meta = CString::new(path.to_str().unwrap()).unwrap();
+        c_meta_ptr = c_meta.as_ptr();
+    }
 
-    if unsafe { nereon_ctx_init(&mut ctx, cfg.ptr, PathOrNull::new(meta).ptr) } == -1 {
+    if unsafe { nereon_ctx_init(&mut ctx, c_cfg_ptr, c_meta_ptr) } == -1 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
             "Failed to get nereon configuration.",
         ));
     }
 
-    let mut cfg = None;
-
-    // top object is defunct - root object is first child
-    if !ctx.cfg.is_null() {
-        let defunct = unsafe { ptr::read(ctx.cfg as *const Cfg) };
-        if !defunct.childs.is_null() {
-            let cfg_rec: Cfg = unsafe { ptr::read(defunct.childs as *const Cfg) };
-            cfg = Some(get_cfg(&cfg_rec));
-        }
-    }
+    let result = (
+        match ctx.cfg {
+            p if !p.is_null() => Some(get_cfg(unsafe { &*p })),
+            _ => None,
+        },
+        match ctx.meta_count as usize {
+            0 => vec![],
+            c => unsafe { slice::from_raw_parts(ctx.meta, c) }
+                .iter()
+                .map(get_meta)
+                .collect::<Vec<_>>(),
+        },
+    );
 
     unsafe { nereon_ctx_finalize(&mut ctx) };
 
-    Ok((cfg, vec![]))
+    Ok(result)
 }
 
-fn get_cfg(cfg_rec: &Cfg) -> super::Cfg {
-    let key = unsafe { CStr::from_ptr(cfg_rec.cfg_key.as_ptr()) }
-        .to_str()
-        .unwrap()
-        .to_owned();
-    let data = match cfg_rec.cfg_type {
-        0 => {
-            let mut i: i64 = 0;
-            unsafe {
-                ptr::copy(
-                    &cfg_rec.cfg_data as *const _ as *const u8,
-                    &i as *const _ as *mut u8,
-                    8,
-                );
-            }
-            super::CfgData::Int(i)
-        }
-        2 => {
-            let mut s: *const libc::c_char;
-            unsafe {
-                s = mem::uninitialized();
-                ptr::copy(
-                    &cfg_rec.cfg_data as *const _ as *const u8,
-                    &s as *const _ as *mut u8,
-                    mem::size_of::<*const libc::c_void>(),
-                );
-            }
-            super::CfgData::String(unsafe { CStr::from_ptr(s) }.to_str().unwrap().to_owned())
-        }
-        3 => super::CfgData::Array(get_cfg_childs(cfg_rec)),
-        6 => super::CfgData::Object(get_cfg_childs(cfg_rec)),
-        n => panic!("aaarggghhh {}", n),
-    };
-
-    super::Cfg {
-        key: key,
-        data: data,
+fn get_meta(m: &Meta) -> super::Meta {
+    super::Meta {
+        name: copy_c_string(m.cfg_name.as_ptr()),
+        data: match m.cfg_type {
+            NEREON_TYPE_INT => super::MetaData::Int(i64_from_data(m.cfg_data)),
+            NEREON_TYPE_BOOL => super::MetaData::Bool(bool_from_data(m.cfg_data)),
+            NEREON_TYPE_FLOAT => super::MetaData::Float(m.cfg_data),
+            NEREON_TYPE_STRING => super::MetaData::String(string_from_data(m.cfg_data)),
+            NEREON_TYPE_IPPORT => super::MetaData::IpPort(i64_from_data(m.cfg_data) as i32),
+            n => panic!("Unknown NEREON_TYPE_ {}", n),
+        },
+        helper: m.helper,
+        sw_short: copy_c_string(m.sw_short.as_ptr()),
+        sw_long: copy_c_string(m.sw_long.as_ptr()),
+        desc_short: copy_c_string(m.desc_short.as_ptr()),
+        desc_long: copy_c_string(m.desc_long.as_ptr()),
+        cfg_env: copy_c_string(m.cfg_env.as_ptr()),
+        cfg_key: copy_c_string(m.cfg_key.as_ptr()),
     }
 }
 
-fn get_cfg_childs(cfg_rec: &Cfg) -> Vec<super::Cfg> {
+fn get_cfg(c: &Cfg) -> super::Cfg {
+    super::Cfg {
+        key: copy_c_string(c.cfg_key.as_ptr()),
+        data: match c.cfg_type {
+            NEREON_TYPE_INT => super::CfgData::Int(i64_from_data(c.cfg_data)),
+            NEREON_TYPE_BOOL => super::CfgData::Bool(bool_from_data(c.cfg_data)),
+            NEREON_TYPE_FLOAT => super::CfgData::Float(c.cfg_data),
+            NEREON_TYPE_STRING => super::CfgData::String(string_from_data(c.cfg_data)),
+            NEREON_TYPE_ARRAY => super::CfgData::Array(get_cfg_childs(c)),
+            NEREON_TYPE_OBJECT => super::CfgData::Object(get_cfg_childs(c)),
+            n => panic!("Unknown NEREON_TYPE_ {}", n),
+        },
+    }
+}
+
+fn get_cfg_childs(c: &Cfg) -> Vec<super::Cfg> {
     let mut cfgs = vec![];
-    let mut addr = cfg_rec.childs;
+    let mut addr = c.childs;
 
     while !addr.is_null() {
-        let cfg_rec: Cfg = unsafe { ptr::read(addr as *const Cfg) };
-        cfgs.push(get_cfg(&cfg_rec));
-        addr = cfg_rec.next;
+        let c = unsafe { ptr::read(addr) };
+        cfgs.push(get_cfg(&c));
+        addr = c.next;
     }
     cfgs
+}
+
+fn copy_c_string(p: *const libc::c_char) -> String {
+    match p.is_null() {
+        false => unsafe { CStr::from_ptr(p) }.to_str().unwrap().to_owned(),
+        true => "".to_owned(),
+    }
+}
+
+fn string_from_data(p: f64) -> String {
+    let s: *const libc::c_char = unsafe { mem::transmute(p) };
+    copy_c_string(s)
+}
+
+fn bool_from_data(p: f64) -> bool {
+    i64_from_data(p) & 0xff != 0
+}
+
+fn i64_from_data(p: f64) -> i64 {
+    unsafe { mem::transmute(p) }
 }
 
 #[cfg(test)]
@@ -195,6 +217,7 @@ mod tests {
         ) {
             Ok((Some(c), m)) => {
                 println!("{:?}", c);
+                println!("{:?}", m);
                 assert_eq!(m.len(), 0);
             }
             _ => panic!("nereon with cfg not behaving"),
