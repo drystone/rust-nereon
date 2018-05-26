@@ -27,7 +27,7 @@ use std::path::Path;
 
 mod libnereon;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum CfgData {
     Int(i64),
     Bool(bool),
@@ -37,7 +37,7 @@ pub enum CfgData {
     Object(Vec<Cfg>),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum MetaData {
     Int(i64),
     Bool(bool),
@@ -46,7 +46,7 @@ pub enum MetaData {
     Float(f64),
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Meta {
     name: String,
     data: MetaData,
@@ -59,7 +59,7 @@ pub struct Meta {
     cfg_key: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Cfg {
     key: String,
     data: CfgData,

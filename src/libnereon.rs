@@ -23,10 +23,10 @@
 
 extern crate libc;
 
+use std::ffi::OsString;
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::{io, mem, ptr, slice};
-use std::ffi::OsString;
 
 #[link(name = "nereon")]
 extern "C" {
@@ -125,7 +125,9 @@ where
 
     // process command line options
     // collect args as CString and parallel Vec of ptr
-    let args = args.into_iter().map(|a| CString::new(a.to_str().unwrap()).unwrap()).collect::<Vec<_>>();
+    let args = args.into_iter()
+        .map(|a| CString::new(a.to_str().unwrap()).unwrap())
+        .collect::<Vec<_>>();
     let c_args = args.iter().map(|a| a.as_ptr()).collect::<Vec<_>>();
 
     // update nereon context with command line args
@@ -136,7 +138,7 @@ where
     }
 
     // collect nereon context into Rust structs
-    let result = (
+    let result = Ok((
         match ctx.cfg {
             p if !p.is_null() => Some(get_cfg(unsafe { &*p })),
             _ => None,
@@ -148,12 +150,12 @@ where
                 .map(get_meta)
                 .collect::<Vec<_>>(),
         },
-    );
+    ));
 
     // destroy context and return
     unsafe { nereon_ctx_finalize(&mut ctx) };
 
-    Ok(result)
+    result
 }
 
 fn get_meta(m: &Meta) -> super::Meta {
@@ -226,28 +228,61 @@ fn i64_from_data(p: f64) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    extern crate tempfile;
+
+    use self::tempfile::NamedTempFile;
+    use super::super::{Cfg, CfgData, Meta, MetaData};
+    use super::nereon;
     use std::env;
     use std::ffi::OsString;
-    //    use super::*;
+    use std::io;
+    use std::io::Write;
+    use std::path::Path;
 
     #[test]
-    fn nereon() {
-        //        match super::nereon(None, None) {
-        //            Ok((c, m)) => assert_eq!((c.len(), m.len()), (0,0)),
-        //            _ => panic!("nereon not behaving")
-        //        }
-        match super::nereon(
-            Some(Path::new("./testdata/cfg.hcl")),
-            Some(Path::new("./testdata/cmdline.hcl")),
-            ["", "-l", "/log"].iter().map(|a| OsString::from(a)),
-        ) {
-            Ok((Some(c), m)) => {
-                println!("{:?}", c);
-                println!("{:?}", m);
-                assert_eq!(m.len(), 0);
+    fn test() {
+        // empty everything
+        assert!(test_nereon(nereon(None, None, vec![]), (None, vec![])));
+        // just some args
+        assert!(test_nereon(
+            nereon(None, None, args(vec!["", "-a", "apples", "-p"])),
+            (None, vec![])
+        ));
+        // types
+
+        type_test("true", CfgData::Bool(true));
+        type_test("10", CfgData::Int(10));
+        type_test("42.0", CfgData::Float(42.0));
+        type_test("\"42\"", CfgData::String("42".to_owned()));
+    }
+
+    fn type_test(v: &str, d: CfgData) {
+        let mut f = NamedTempFile::new().unwrap();
+        let _t = writeln!(f, "a:{}", v);
+        let r = nereon(Some(f.path()), None, vec![]);
+        let c = config_item("", CfgData::Object(vec![config_item("a", d)]));
+        assert!(test_nereon(r, (Some(c), vec![])));
+    }
+
+    fn test_nereon(r: io::Result<(Option<Cfg>, Vec<Meta>)>, t: (Option<Cfg>, Vec<Meta>)) -> bool {
+        match r {
+            Ok(ref rr) if rr == &t => true,
+            _ => {
+                println!("{:?}", r);
+                println!("Ok({:?})", t);
+                false
             }
-            _ => panic!("nereon with cfg not behaving"),
+        }
+    }
+
+    fn args(a: Vec<&str>) -> Vec<OsString> {
+        a.iter().map(|a| OsString::from(a)).collect()
+    }
+
+    fn config_item(k: &str, d: CfgData) -> Cfg {
+        Cfg {
+            key: k.to_owned(),
+            data: d,
         }
     }
 }
