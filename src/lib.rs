@@ -21,10 +21,14 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-pub mod c_nereon;
+use std::ffi::OsString;
+use std::io;
+use std::path::Path;
+
+mod libnereon;
 
 #[derive(Debug)]
-enum CfgData {
+pub enum CfgData {
     Int(i64),
     Bool(bool),
     String(String),
@@ -34,7 +38,7 @@ enum CfgData {
 }
 
 #[derive(Debug)]
-enum MetaData {
+pub enum MetaData {
     Int(i64),
     Bool(bool),
     String(String),
@@ -59,6 +63,17 @@ pub struct Meta {
 pub struct Cfg {
     key: String,
     data: CfgData,
+}
+
+pub fn nereon<'a, I>(
+    cfg: Option<&Path>,
+    meta: Option<&Path>,
+    argv: I,
+) -> io::Result<(Option<Cfg>, Vec<Meta>)>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    libnereon::nereon(cfg, meta, argv)
 }
 
 #[cfg(test)]

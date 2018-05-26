@@ -26,6 +26,7 @@ extern crate libc;
 use std::ffi::{CStr, CString};
 use std::path::Path;
 use std::{io, mem, ptr, slice};
+use std::ffi::OsString;
 
 #[link(name = "nereon")]
 extern "C" {
@@ -34,6 +35,7 @@ extern "C" {
         cfg_path: *const libc::c_char,
         meta_path: *const libc::c_char,
     ) -> libc::c_int;
+    fn nereon_parse_cmdline(ctx: *mut Ctx, n: libc::c_int, p: *const *const libc::c_char);
     fn nereon_ctx_finalize(ctx: *mut Ctx) -> ();
 }
 
@@ -82,16 +84,22 @@ struct Meta {
     cfg_data: f64,
 }
 
-pub fn nereon(
+pub fn nereon<'a, I>(
     cfg: Option<&Path>,
     meta: Option<&Path>,
-) -> io::Result<(Option<super::Cfg>, Vec<super::Meta>)> {
+    args: I,
+) -> io::Result<(Option<super::Cfg>, Vec<super::Meta>)>
+where
+    I: IntoIterator<Item = OsString>,
+{
+    // new empty context for libnereon
     let mut ctx = Ctx {
         meta: ptr::null_mut(),
         meta_count: 0,
         cfg: ptr::null(),
     };
 
+    // c_cfg_ptr is valid or NULL
     let c_cfg;
     let mut c_cfg_ptr = ptr::null();
     if let Some(path) = cfg {
@@ -99,6 +107,7 @@ pub fn nereon(
         c_cfg_ptr = c_cfg.as_ptr();
     }
 
+    // c_meta_ptr is valid or NULL
     let c_meta;
     let mut c_meta_ptr = ptr::null();
     if let Some(path) = meta {
@@ -106,6 +115,7 @@ pub fn nereon(
         c_meta_ptr = c_meta.as_ptr();
     }
 
+    // initialise our libnereon context from config files
     if unsafe { nereon_ctx_init(&mut ctx, c_cfg_ptr, c_meta_ptr) } == -1 {
         return Err(io::Error::new(
             io::ErrorKind::Other,
@@ -113,6 +123,19 @@ pub fn nereon(
         ));
     }
 
+    // process command line options
+    // collect args as CString and parallel Vec of ptr
+    let args = args.into_iter().map(|a| CString::new(a.to_str().unwrap()).unwrap()).collect::<Vec<_>>();
+    let c_args = args.iter().map(|a| a.as_ptr()).collect::<Vec<_>>();
+
+    // update nereon context with command line args
+    if c_args.len() > 1 {
+        unsafe {
+            nereon_parse_cmdline(&mut ctx, c_args.len() as libc::c_int, c_args.as_ptr());
+        }
+    }
+
+    // collect nereon context into Rust structs
     let result = (
         match ctx.cfg {
             p if !p.is_null() => Some(get_cfg(unsafe { &*p })),
@@ -127,6 +150,7 @@ pub fn nereon(
         },
     );
 
+    // destroy context and return
     unsafe { nereon_ctx_finalize(&mut ctx) };
 
     Ok(result)
@@ -203,6 +227,8 @@ fn i64_from_data(p: f64) -> i64 {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+    use std::env;
+    use std::ffi::OsString;
     //    use super::*;
 
     #[test]
@@ -214,6 +240,7 @@ mod tests {
         match super::nereon(
             Some(Path::new("./testdata/cfg.hcl")),
             Some(Path::new("./testdata/cmdline.hcl")),
+            ["", "-l", "/log"].iter().map(|a| OsString::from(a)),
         ) {
             Ok((Some(c), m)) => {
                 println!("{:?}", c);
